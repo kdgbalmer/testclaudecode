@@ -1,0 +1,470 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Space Invaders</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #000;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    min-height: 100vh;
+    font-family: 'Courier New', monospace;
+    color: #0f0;
+    overflow: hidden;
+  }
+  #game-wrapper {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 10px;
+  }
+  #hud {
+    display: flex;
+    justify-content: space-between;
+    width: 640px;
+    font-size: 18px;
+    padding: 5px 10px;
+  }
+  canvas {
+    border: 2px solid #0f0;
+    display: block;
+  }
+  #overlay {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    text-align: center;
+    display: none;
+    z-index: 10;
+  }
+  #overlay h1 { font-size: 48px; margin-bottom: 20px; }
+  #overlay p { font-size: 20px; margin-bottom: 10px; }
+  #overlay .sub { font-size: 14px; color: #0a0; }
+</style>
+</head>
+<body>
+<div id="game-wrapper">
+  <div id="hud">
+    <span>SCORE: <span id="score">0</span></span>
+    <span>LEVEL: <span id="level">1</span></span>
+    <span>LIVES: <span id="lives">3</span></span>
+  </div>
+  <canvas id="game" width="640" height="480"></canvas>
+</div>
+<div id="overlay">
+  <h1 id="overlay-title">SPACE INVADERS</h1>
+  <p id="overlay-msg">Press ENTER or click to start</p>
+  <p class="sub">Arrow keys / A,D to move | Space to shoot</p>
+</div>
+
+<script>
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+const W = canvas.width;
+const H = canvas.height;
+const overlay = document.getElementById('overlay');
+const overlayTitle = document.getElementById('overlay-title');
+const overlayMsg = document.getElementById('overlay-msg');
+const scoreEl = document.getElementById('score');
+const levelEl = document.getElementById('level');
+const livesEl = document.getElementById('lives');
+
+// Game state
+let state = 'start'; // start, playing, gameover, levelup
+let score = 0;
+let lives = 3;
+let level = 1;
+let player, bullets, enemyBullets, invaders, particles, barriers;
+let invaderDir, invaderSpeed, invaderDropTimer, shootTimer;
+let keys = {};
+let lastTime = 0;
+let starField = [];
+
+// Stars background
+for (let i = 0; i < 120; i++) {
+  starField.push({
+    x: Math.random() * W,
+    y: Math.random() * H,
+    size: Math.random() * 2 + 0.5,
+    speed: Math.random() * 20 + 10,
+    brightness: Math.random()
+  });
+}
+
+function initLevel() {
+  player = { x: W / 2, y: H - 40, w: 40, h: 20, speed: 250 };
+  bullets = [];
+  enemyBullets = [];
+  particles = [];
+  invaders = [];
+  invaderDir = 1;
+  invaderSpeed = 30 + level * 8;
+  invaderDropTimer = 0;
+  shootTimer = 0;
+
+  const rows = Math.min(3 + Math.floor(level / 2), 6);
+  const cols = Math.min(8 + Math.floor(level / 3), 11);
+  const spacing = 50;
+  const offsetX = (W - cols * spacing) / 2 + 15;
+
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      invaders.push({
+        x: offsetX + c * spacing,
+        y: 50 + r * 40,
+        w: 30,
+        h: 20,
+        type: r < 1 ? 2 : r < 3 ? 1 : 0,
+        alive: true,
+        frame: 0
+      });
+    }
+  }
+
+  // Barriers
+  barriers = [];
+  const barrierCount = 4;
+  const barrierW = 60;
+  const gap = (W - barrierCount * barrierW) / (barrierCount + 1);
+  for (let i = 0; i < barrierCount; i++) {
+    const bx = gap + i * (barrierW + gap);
+    const by = H - 100;
+    // Each barrier is a grid of small blocks
+    for (let r = 0; r < 4; r++) {
+      for (let c = 0; c < 8; c++) {
+        // Skip bottom corners for arch shape
+        if (r === 3 && (c === 3 || c === 4)) continue;
+        barriers.push({
+          x: bx + c * (barrierW / 8),
+          y: by + r * 6,
+          w: barrierW / 8,
+          h: 6,
+          hp: 3
+        });
+      }
+    }
+  }
+}
+
+function spawnParticles(x, y, color, count) {
+  for (let i = 0; i < count; i++) {
+    particles.push({
+      x, y,
+      vx: (Math.random() - 0.5) * 200,
+      vy: (Math.random() - 0.5) * 200,
+      life: 0.5 + Math.random() * 0.5,
+      color,
+      size: Math.random() * 3 + 1
+    });
+  }
+}
+
+function update(dt) {
+  if (state !== 'playing') return;
+
+  // Player movement
+  let dx = 0;
+  if (keys['ArrowLeft'] || keys['KeyA']) dx = -1;
+  if (keys['ArrowRight'] || keys['KeyD']) dx = 1;
+  player.x += dx * player.speed * dt;
+  player.x = Math.max(player.w / 2, Math.min(W - player.w / 2, player.x));
+
+  // Shooting
+  shootTimer -= dt;
+  if (keys['Space'] && shootTimer <= 0) {
+    bullets.push({ x: player.x, y: player.y - player.h / 2, vy: -400 });
+    shootTimer = 0.25;
+  }
+
+  // Bullets
+  bullets.forEach(b => b.y += b.vy * dt);
+  bullets = bullets.filter(b => b.y > -10);
+
+  enemyBullets.forEach(b => { b.x += b.vx * dt; b.y += b.vy * dt; });
+  enemyBullets = enemyBullets.filter(b => b.y < H + 10);
+
+  // Invader movement
+  let edgeHit = false;
+  const aliveInvaders = invaders.filter(inv => inv.alive);
+
+  aliveInvaders.forEach(inv => {
+    inv.x += invaderDir * invaderSpeed * dt;
+    inv.frame += dt * 3;
+    if (inv.x < 15 || inv.x + inv.w > W - 15) edgeHit = true;
+  });
+
+  if (edgeHit) {
+    invaderDir *= -1;
+    aliveInvaders.forEach(inv => {
+      inv.y += 15;
+      inv.x += invaderDir * invaderSpeed * dt;
+    });
+    invaderSpeed += 3;
+  }
+
+  // Enemy shooting
+  invaderDropTimer -= dt;
+  if (invaderDropTimer <= 0 && aliveInvaders.length > 0) {
+    const shooter = aliveInvaders[Math.floor(Math.random() * aliveInvaders.length)];
+    enemyBullets.push({
+      x: shooter.x + shooter.w / 2,
+      y: shooter.y + shooter.h,
+      vx: (Math.random() - 0.5) * 30,
+      vy: 150 + level * 15
+    });
+    invaderDropTimer = Math.max(0.3, 1.5 - level * 0.1);
+  }
+
+  // Bullet-invader collision
+  bullets.forEach(b => {
+    aliveInvaders.forEach(inv => {
+      if (b.y < inv.y + inv.h && b.y > inv.y &&
+          b.x > inv.x && b.x < inv.x + inv.w) {
+        inv.alive = false;
+        b.y = -100;
+        score += (inv.type + 1) * 10;
+        scoreEl.textContent = score;
+        const colors = ['#0f0', '#ff0', '#f0f'];
+        spawnParticles(inv.x + inv.w / 2, inv.y + inv.h / 2, colors[inv.type], 12);
+      }
+    });
+  });
+
+  // Bullet-barrier collision
+  bullets.forEach(b => {
+    barriers.forEach(bar => {
+      if (bar.hp > 0 && b.x > bar.x && b.x < bar.x + bar.w &&
+          b.y > bar.y && b.y < bar.y + bar.h) {
+        bar.hp--;
+        b.y = -100;
+      }
+    });
+  });
+
+  enemyBullets.forEach(b => {
+    barriers.forEach(bar => {
+      if (bar.hp > 0 && b.x > bar.x && b.x < bar.x + bar.w &&
+          b.y > bar.y && b.y < bar.y + bar.h) {
+        bar.hp--;
+        b.y = H + 100;
+      }
+    });
+  });
+
+  // Enemy bullet-player collision
+  enemyBullets.forEach(b => {
+    if (b.x > player.x - player.w / 2 && b.x < player.x + player.w / 2 &&
+        b.y > player.y - player.h / 2 && b.y < player.y + player.h / 2) {
+      b.y = H + 100;
+      lives--;
+      livesEl.textContent = lives;
+      spawnParticles(player.x, player.y, '#0f0', 20);
+      if (lives <= 0) {
+        state = 'gameover';
+        showOverlay('GAME OVER', `Final Score: ${score} | Press ENTER to restart`);
+      }
+    }
+  });
+
+  // Invader reaches bottom
+  if (aliveInvaders.some(inv => inv.y + inv.h > H - 60)) {
+    lives = 0;
+    livesEl.textContent = 0;
+    state = 'gameover';
+    showOverlay('GAME OVER', `The invaders have landed! Score: ${score}`);
+  }
+
+  // Level complete
+  if (aliveInvaders.length === 0) {
+    level++;
+    levelEl.textContent = level;
+    state = 'levelup';
+    showOverlay(`LEVEL ${level}`, 'Press ENTER to continue');
+  }
+
+  // Particles
+  particles.forEach(p => {
+    p.x += p.vx * dt;
+    p.y += p.vy * dt;
+    p.life -= dt;
+  });
+  particles = particles.filter(p => p.life > 0);
+
+  // Stars
+  starField.forEach(s => {
+    s.y += s.speed * dt;
+    if (s.y > H) { s.y = 0; s.x = Math.random() * W; }
+  });
+}
+
+function drawPlayer() {
+  ctx.fillStyle = '#0f0';
+  const px = player.x;
+  const py = player.y;
+  // Ship body
+  ctx.beginPath();
+  ctx.moveTo(px, py - 15);
+  ctx.lineTo(px - 18, py + 8);
+  ctx.lineTo(px - 10, py + 5);
+  ctx.lineTo(px - 8, py + 10);
+  ctx.lineTo(px + 8, py + 10);
+  ctx.lineTo(px + 10, py + 5);
+  ctx.lineTo(px + 18, py + 8);
+  ctx.closePath();
+  ctx.fill();
+  // Cockpit
+  ctx.fillStyle = '#0a0';
+  ctx.fillRect(px - 3, py - 5, 6, 8);
+}
+
+function drawInvader(inv) {
+  const cx = inv.x + inv.w / 2;
+  const cy = inv.y + inv.h / 2;
+  const f = Math.floor(inv.frame) % 2;
+  const colors = ['#0f0', '#ff0', '#f0f'];
+  ctx.fillStyle = colors[inv.type];
+
+  if (inv.type === 0) {
+    // Basic invader - block shape
+    ctx.fillRect(inv.x + 4, inv.y, inv.w - 8, inv.h);
+    ctx.fillRect(inv.x, inv.y + 4, inv.w, inv.h - 8);
+    ctx.fillRect(inv.x + 2, inv.y + inv.h - 4, 4, 4 + f * 2);
+    ctx.fillRect(inv.x + inv.w - 6, inv.y + inv.h - 4, 4, 4 + f * 2);
+    // Eyes
+    ctx.fillStyle = '#000';
+    ctx.fillRect(inv.x + 8, inv.y + 6, 4, 4);
+    ctx.fillRect(inv.x + inv.w - 12, inv.y + 6, 4, 4);
+  } else if (inv.type === 1) {
+    // Medium invader - rounder
+    ctx.beginPath();
+    ctx.arc(cx, cy, 12, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillRect(inv.x + 2, cy, 6, 8 + f * 3);
+    ctx.fillRect(inv.x + inv.w - 8, cy, 6, 8 + f * 3);
+    ctx.fillStyle = '#000';
+    ctx.fillRect(cx - 6, cy - 3, 4, 4);
+    ctx.fillRect(cx + 2, cy - 3, 4, 4);
+  } else {
+    // Elite invader - diamond
+    ctx.beginPath();
+    ctx.moveTo(cx, inv.y);
+    ctx.lineTo(inv.x + inv.w, cy);
+    ctx.lineTo(cx, inv.y + inv.h);
+    ctx.lineTo(inv.x, cy);
+    ctx.closePath();
+    ctx.fill();
+    const tentLen = f === 0 ? 6 : 10;
+    ctx.fillRect(cx - 2, inv.y + inv.h, 4, tentLen);
+    ctx.fillStyle = '#000';
+    ctx.fillRect(cx - 4, cy - 2, 3, 3);
+    ctx.fillRect(cx + 1, cy - 2, 3, 3);
+  }
+}
+
+function draw() {
+  ctx.fillStyle = '#000';
+  ctx.fillRect(0, 0, W, H);
+
+  // Stars
+  starField.forEach(s => {
+    const a = 0.3 + 0.7 * Math.abs(Math.sin(s.brightness + performance.now() / 1000));
+    ctx.fillStyle = `rgba(255,255,255,${a})`;
+    ctx.fillRect(s.x, s.y, s.size, s.size);
+  });
+
+  if (state === 'start') return;
+
+  // Barriers
+  barriers.forEach(bar => {
+    if (bar.hp <= 0) return;
+    const alpha = bar.hp / 3;
+    ctx.fillStyle = `rgba(0, 180, 0, ${alpha})`;
+    ctx.fillRect(bar.x, bar.y, bar.w, bar.h);
+  });
+
+  // Player
+  if (state === 'playing' || state === 'levelup') {
+    drawPlayer();
+  }
+
+  // Invaders
+  invaders.filter(inv => inv.alive).forEach(drawInvader);
+
+  // Bullets
+  ctx.fillStyle = '#fff';
+  bullets.forEach(b => {
+    ctx.fillRect(b.x - 1.5, b.y, 3, 10);
+  });
+
+  ctx.fillStyle = '#f55';
+  enemyBullets.forEach(b => {
+    ctx.fillRect(b.x - 2, b.y, 4, 8);
+  });
+
+  // Particles
+  particles.forEach(p => {
+    ctx.globalAlpha = p.life;
+    ctx.fillStyle = p.color;
+    ctx.fillRect(p.x, p.y, p.size, p.size);
+  });
+  ctx.globalAlpha = 1;
+}
+
+function showOverlay(title, msg) {
+  overlayTitle.textContent = title;
+  overlayMsg.textContent = msg;
+  overlay.style.display = 'block';
+}
+
+function hideOverlay() {
+  overlay.style.display = 'none';
+}
+
+function startGame() {
+  score = 0;
+  lives = 3;
+  level = 1;
+  scoreEl.textContent = score;
+  levelEl.textContent = level;
+  livesEl.textContent = lives;
+  initLevel();
+  state = 'playing';
+  hideOverlay();
+}
+
+function gameLoop(time) {
+  const dt = Math.min((time - lastTime) / 1000, 0.05);
+  lastTime = time;
+  update(dt);
+  draw();
+  requestAnimationFrame(gameLoop);
+}
+
+// Input
+document.addEventListener('keydown', e => {
+  keys[e.code] = true;
+  if (e.code === 'Enter') {
+    if (state === 'start' || state === 'gameover') startGame();
+    else if (state === 'levelup') { initLevel(); state = 'playing'; hideOverlay(); }
+  }
+  if (['Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.code)) {
+    e.preventDefault();
+  }
+});
+document.addEventListener('keyup', e => { keys[e.code] = false; });
+canvas.addEventListener('click', () => {
+  if (state === 'start' || state === 'gameover') startGame();
+  else if (state === 'levelup') { initLevel(); state = 'playing'; hideOverlay(); }
+});
+
+// Init
+showOverlay('SPACE INVADERS', 'Press ENTER or click to start');
+requestAnimationFrame(gameLoop);
+</script>
+</body>
+</html>
